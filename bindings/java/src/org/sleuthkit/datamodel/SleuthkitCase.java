@@ -94,7 +94,7 @@ public class SleuthkitCase {
 	 * tsk/auto/tsk_db.h.
 	 */
 	private static final CaseDbSchemaVersionNumber CURRENT_DB_SCHEMA_VERSION
-			= new CaseDbSchemaVersionNumber(8, 2);
+			= new CaseDbSchemaVersionNumber(8, 3);
 
 	private static final long BASE_ARTIFACT_ID = Long.MIN_VALUE; // Artifact ids will start at the lowest negative value
 	private static final Logger logger = Logger.getLogger(SleuthkitCase.class.getName());
@@ -862,8 +862,11 @@ public class SleuthkitCase {
 				dbSchemaVersion = updateFromSchema7dot2toSchema8dot0(dbSchemaVersion, connection);
 				dbSchemaVersion = updateFromSchema8dot0toSchema8dot1(dbSchemaVersion, connection);
 				dbSchemaVersion = updateFromSchema8dot1toSchema8dot2(dbSchemaVersion, connection);
+				dbSchemaVersion = updateFromSchema8dot2toSchema8dot3(dbSchemaVersion, connection);
 				statement = connection.createStatement();
 				connection.executeUpdate(statement, "UPDATE tsk_db_info SET schema_ver = " + dbSchemaVersion.getMajor() + ", schema_minor_ver = " + dbSchemaVersion.getMinor()); //NON-NLS
+                connection.executeUpdate(statement, "UPDATE tsk_db_info_extended set value = " + dbSchemaVersion.getMajor() + " WHERE name = 'SCHEMA_MAJOR_VERSION'");
+                connection.executeUpdate(statement, "UPDATE tsk_db_info_extended set value = " + dbSchemaVersion.getMinor() + " WHERE name = 'SCHEMA_MINOR_VERSION'");
 				statement.close();
 				statement = null;
 			}
@@ -1660,6 +1663,42 @@ public class SleuthkitCase {
 			statement.execute("INSERT INTO tsk_db_info_extended (name, value) VALUES ('" + CREATION_SCHEMA_MINOR_VERSION_KEY + "', '0')");
 
 			return new CaseDbSchemaVersionNumber(8, 2);
+
+		} finally {
+			closeStatement(statement);
+			releaseSingleUserCaseWriteLock();
+		}
+	}
+	
+	/**
+	 * Updates a schema version 8.2 database to a schema version 8.3 database.
+	 *
+	 * @param schemaVersion The current schema version of the database.
+	 * @param connection    A connection to the case database.
+	 *
+	 * @return The new database schema version.
+	 *
+	 * @throws SQLException     If there is an error completing a database
+	 *                          operation.
+	 * @throws TskCoreException If there is an error completing a database
+	 *                          operation via another SleuthkitCase method.
+	 */
+	private CaseDbSchemaVersionNumber updateFromSchema8dot2toSchema8dot3(CaseDbSchemaVersionNumber schemaVersion, CaseDbConnection connection) throws SQLException, TskCoreException {
+		if (schemaVersion.getMajor() != 8) {
+			return schemaVersion;
+		}
+
+		if (schemaVersion.getMinor() != 2) {
+			return schemaVersion;
+		}
+		Statement statement = connection.createStatement();
+		acquireSingleUserCaseWriteLock();
+		try {
+			// Add new hash columns
+			statement.execute("UPDATE tsk_db_info_extended SET name = 'CREATION_SCHEMA_MAJOR_VERSION' WHERE name = 'CREATED_SCHEMA_MAJOR_VERSION';");
+			statement.execute("UPDATE tsk_db_info_extended SET name = 'CREATION_SCHEMA_MINOR_VERSION' WHERE name = 'CREATED_SCHEMA_MINOR_VERSION';");
+			
+			return new CaseDbSchemaVersionNumber(8, 3);
 
 		} finally {
 			closeStatement(statement);
@@ -7512,6 +7551,35 @@ public class SleuthkitCase {
 		}
 	}
 
+	public void deleteDataSource(long obj_id) throws TskCoreException {
+        CaseDbConnection connection = connections.getConnection();
+		Statement statement = null;
+		Statement statement2 = null;
+		ResultSet resultSet = null;
+		acquireSingleUserCaseWriteLock();
+		try {
+			statement = connection.createStatement();
+			connection.beginTransaction();
+			statement.execute("DELETE FROM tsk_objects WHERE obj_id = " + Long.toString(obj_id));
+			statement.execute("DELETE FROM image_gallery_groups WHERE data_source_obj_id = " + Long.toString(obj_id));
+			String accountSQL = "SELECT account_id FROM accounts " +
+                                "WHERE account_id NOT IN (SELECT account1_id FROM account_relationships) " +
+                                "AND account_id NOT IN (SELECT account2_id FROM account_relationships);";
+            statement2 = connection.createStatement();
+			resultSet = connection.executeQuery(statement2, accountSQL); //NON-NLS
+			while (resultSet.next()) {
+				statement.execute("DELETE FROM accounts WHERE account_id = " + resultSet.getString("account_id"));
+			}
+			connection.commitTransaction();
+		} catch (SQLException ex) {
+				connection.rollbackTransaction();
+			    throw new TskCoreException("Error deleting data source.", ex);	
+		} finally {
+			connection.close();
+			releaseSingleUserCaseWriteLock();
+		}	
+	}
+
 	/**
 	 * Creates file object from a SQL query result set of rows from the
 	 * tsk_files table. Assumes that the query was of the form "SELECT * FROM
@@ -10346,7 +10414,8 @@ public class SleuthkitCase {
 		INSERT_VS_PART_SQLITE("INSERT INTO tsk_vs_parts (obj_id, addr, start, length, desc, flags) VALUES (?, ?, ?, ?, ?, ?)"),
 		INSERT_VS_PART_POSTGRESQL("INSERT INTO tsk_vs_parts (obj_id, addr, start, length, descr, flags) VALUES (?, ?, ?, ?, ?, ?)"),
 		INSERT_FS_INFO("INSERT INTO tsk_fs_info (obj_id, img_offset, fs_type, block_size, block_count, root_inum, first_inum, last_inum, display_name)"
-					+ "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
+					+ "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"),
+		SELECT_CREATE_SCHEMA_VERSION("SELECT ");
 		
 		
 		private final String sql;
